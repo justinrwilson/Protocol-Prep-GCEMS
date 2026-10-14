@@ -901,7 +901,7 @@ body.locked .shell, body.locked .tabbar{display:none!important}
   <form class="box" id="lock-form" autocomplete="off">
     <div class="brand"><div class="brand-mark"><span>GC</span></div><div><b>Protocol Prep</b><small>Garrard County EMS</small></div></div>
     <h1>Enter your access code</h1>
-    <p class="muted">This study app is private. Open the link you were sent, or type the access code that came with it.</p>
+    <p class="muted">This study app is private. Open your personal link, or type the access code that came with it.</p>
     <label class="sr" for="lock-code">Access code</label>
     <input id="lock-code" name="code" type="text" inputmode="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="word-word-word-word-word-00">
     <button class="btn primary block" type="submit" id="lock-go">Unlock</button>
@@ -911,55 +911,63 @@ body.locked .shell, body.locked .tabbar{display:none!important}
 <div id="lock-loading" class="busy" style="padding:40px 16px;text-align:center;color:var(--muted)">Loading…</div>
 <script>
 (function(){
-  var LS='gcpp-key-v1', enc=new TextEncoder(), blob=null;
+  var LS='gcpp-k-v2', enc=new TextEncoder(), files=null;
   function norm(c){ return String(c||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,''); }
-  function b64(u){ var s=''; for(var i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s); }
+  function b64(u){ u=new Uint8Array(u); var s=''; for(var i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s); }
   function unb64(s){ var b=atob(s), u=new Uint8Array(b.length); for(var i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; }
+  function hex(u){ return Array.from(new Uint8Array(u)).map(function(x){return x.toString(16).padStart(2,'0');}).join(''); }
   function show(id,on){ var el=document.getElementById(id); if(el) el.hidden=!on; }
   function err(msg){ document.getElementById('lock-err').textContent=msg||''; }
   async function load(){
-    if(blob) return blob;
-    var r=await fetch('data.enc'); if(!r.ok) throw new Error('fetch');
-    var u=new Uint8Array(await r.arrayBuffer());
-    var magic=new TextDecoder().decode(u.slice(0,5)); if(magic!=='GCPP1') throw new Error('format');
-    blob={salt:u.slice(5,21), iv:u.slice(21,33), ct:u.slice(33)}; return blob;
+    if(files) return files;
+    var r1=await fetch('keys.json'), r2=await fetch('data.enc');
+    if(!r1.ok||!r2.ok) throw new Error('fetch');
+    var keys=await r1.json(), u=new Uint8Array(await r2.arrayBuffer());
+    if(new TextDecoder().decode(u.slice(0,5))!=='GCPP2') throw new Error('format');
+    files={keys:keys, iv:u.slice(5,17), ct:u.slice(17)}; return files;
   }
-  async function derive(code,salt){
-    var base=await crypto.subtle.importKey('raw',enc.encode(norm(code)),'PBKDF2',false,['deriveKey']);
-    return crypto.subtle.deriveKey({name:'PBKDF2',salt:salt,iterations:310000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},true,['decrypt']);
+  async function master(code){
+    var f=await load(); var base=await crypto.subtle.importKey('raw',enc.encode(norm(code)),'PBKDF2',false,['deriveBits']);
+    return new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt:unb64(f.keys.salt),iterations:f.keys.iter||310000,hash:'SHA-256'},base,256));
   }
-  async function open(key){
-    var b=await load();
-    var plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:b.iv},key,b.ct);
+  async function hmac(K,label){ var k=await crypto.subtle.importKey('raw',K,{name:'HMAC',hash:'SHA-256'},false,['sign']); return new Uint8Array(await crypto.subtle.sign('HMAC',k,enc.encode(label))); }
+  async function openWith(K){
+    var f=await load();
+    var id=hex((await hmac(K,'gcpp-id')).slice(0,8));
+    var e=(f.keys.entries||[]).find(function(x){return x.id===id;});
+    if(!e){ var er=new Error('noentry'); er.code='noentry'; throw er; }
+    var kek=await crypto.subtle.importKey('raw',await hmac(K,'gcpp-wrap'),{name:'AES-GCM'},false,['decrypt']);
+    var dkRaw=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(e.iv)},kek,unb64(e.wk));
+    var dk=await crypto.subtle.importKey('raw',dkRaw,{name:'AES-GCM'},false,['decrypt']);
+    var plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:f.iv},dk,f.ct);
     var text=await new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
     return JSON.parse(text);
   }
-  async function remember(key){ try{ var raw=new Uint8Array(await crypto.subtle.exportKey('raw',key)); localStorage.setItem(LS,JSON.stringify({salt:b64(blob.salt),key:b64(raw)})); }catch(e){} }
+  function remember(K){ try{ localStorage.setItem(LS,b64(K)); localStorage.removeItem('gcpp-key-v1'); }catch(e){} }
+  function forget(){ try{ localStorage.removeItem(LS); localStorage.removeItem('gcpp-key-v1'); }catch(e){} }
   function boot(D){
     show('lock',false); show('lock-loading',false); document.body.classList.remove('locked');
     if(!location.hash || /^#k=/.test(location.hash)) history.replaceState(null,'',location.pathname+location.search+'#home');
     window.__boot(D);
   }
   function lockScreen(msg){ show('lock-loading',false); show('lock',true); document.body.classList.add('locked'); err(msg); }
-  async function tryCode(code){
-    var b=await load(); var key=await derive(code,b.salt); var D=await open(key); await remember(key); return D;
-  }
+  async function tryCode(code){ var K=await master(code); var D=await openWith(K); remember(K); return D; }
   async function start(){
     document.body.classList.add('locked');
     if(!window.crypto||!crypto.subtle||typeof DecompressionStream==='undefined'){ lockScreen('This browser is too old to open the app. Update iOS/Safari or use a current browser.'); return; }
     var m=location.hash.match(/^#k=([A-Za-z0-9-]+)/), fromLink=m?m[1]:null;
     if(fromLink) history.replaceState(null,'',location.pathname+location.search+'#home');
     try{ await load(); }catch(e){ lockScreen('Couldn’t load the app data. Connect to the internet and open it once; after that it works offline.'); return; }
-    if(fromLink){ try{ boot(await tryCode(fromLink)); return; }catch(e){ lockScreen('The code in that link didn’t work. Ask for a new link or type the code.'); return; } }
-    var saved=null; try{ saved=JSON.parse(localStorage.getItem(LS)||'null'); }catch(e){}
-    if(saved && saved.salt===b64(blob.salt)){
-      try{ var key=await crypto.subtle.importKey('raw',unb64(saved.key),{name:'AES-GCM'},true,['decrypt']); boot(await open(key)); return; }catch(e){}
+    if(fromLink){ try{ boot(await tryCode(fromLink)); return; }catch(e){ lockScreen('The code in that link didn’t work. It may have been turned off. Ask for a new link, or type your code.'); return; } }
+    var saved=null; try{ saved=localStorage.getItem(LS); }catch(e){}
+    if(saved){
+      try{ boot(await openWith(unb64(saved))); return; }
+      catch(e){ forget(); lockScreen('Your access code no longer works. Ask Justin for a new one.'); return; }
     }
-    try{ localStorage.removeItem(LS); }catch(e){}
-    lockScreen(saved?'The access code has changed. Enter the new code.':'');
+    lockScreen('');
   }
   document.getElementById('lock-form').addEventListener('submit',async function(ev){
-    ev.preventDefault(); var code=document.getElementById('lock-code').value; if(!norm(code)){ err('Type the access code first.'); return; }
+    ev.preventDefault(); var code=document.getElementById('lock-code').value; if(!norm(code)){ err('Type your access code first.'); return; }
     var btn=document.getElementById('lock-go'); btn.disabled=true; btn.textContent='Checking…'; err('');
     try{ boot(await tryCode(code)); }catch(e){ err('That code didn’t work. Check the spelling and try again.'); }
     btn.disabled=false; btn.textContent='Unlock';

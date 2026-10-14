@@ -1,6 +1,6 @@
 // Offline cache for Garrard Protocol Prep. Bump VERSION when index.html changes.
-const VERSION = 'gcpp-8b15f0cb';
-const CORE = ['./', './index.html', './data.enc', './manifest.webmanifest', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
+const VERSION = 'gcpp-00d16064';
+const CORE = ['./', './index.html', './data.enc', './keys.json', './manifest.webmanifest', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
 const FONT_CSS = "https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Public+Sans:wght@400;500;600;700&display=swap";
 const FONT_HOST = /(^|\.)fonts\.(googleapis|gstatic)\.com$/;
 
@@ -39,6 +39,17 @@ self.addEventListener('fetch', (e) => {
     e.respondWith((async () => {
       const c = await caches.open(VERSION);
       return (await c.match('./index.html')) || (await c.match('./')) || (await net) || new Response('Offline and not cached yet. Open once with a connection.', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+    })());
+    return;
+  }
+  if (url.origin === location.origin && /\/(data\.enc|keys\.json)$/.test(url.pathname)) {
+    e.respondWith((async () => {
+      const c = await caches.open(VERSION);
+      const net = fetch(req, { cache: 'no-cache' }).then((r) => { if (r.ok) c.put(req, r.clone()); return r; });
+      e.waitUntil(net.catch(() => {}));
+      const timeout = new Promise((res) => setTimeout(res, 4000));
+      try { const r = await Promise.race([net, timeout]); if (r && r.ok) return r; } catch (_) {}
+      return (await c.match(req)) || (await net.catch(() => Response.error()));
     })());
     return;
   }
